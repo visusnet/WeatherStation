@@ -1,208 +1,130 @@
 package net.shiruba.tinkerforge.weatherstation;
 
 import com.tinkerforge.*;
-import net.shiruba.tinkerforge.weatherstation.display.DisplayHolder;
-import net.shiruba.tinkerforge.weatherstation.display.DisplayNotYetAvailableException;
-import net.shiruba.tinkerforge.weatherstation.display.DisplayService;
-import net.shiruba.tinkerforge.weatherstation.task.TemperatureMeasuringTask;
+import net.shiruba.tinkerforge.weatherstation.device.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.SpringApplication;
-import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
-import org.springframework.context.annotation.ComponentScan;
-import org.springframework.context.annotation.Configuration;
-import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
+@Component
+public class WeatherStation {
+	private static final Logger logger = LoggerFactory.getLogger(Application.class);
 
-@Configuration
-@ComponentScan
-@EnableAutoConfiguration
-@EnableScheduling
-public class WeatherStation implements IPConnection.EnumerateListener, IPConnection.DisconnectedListener, IPConnection.ConnectedListener {
-    public static final int SENSOR_CALLBACK_PERIOD = 1000;
+	@Value("${host}")
+	private String host;
 
-    private static final Logger logger = LoggerFactory.getLogger(WeatherStation.class);
-    private static final String HOST = "localhost";
-    private static final Integer PORT = 4223;
+	@Value("${port}")
+	private Integer port;
 
-    private IPConnection ipConnection;
+	private final Map<Integer, DeviceInitializer> deviceInitializers = new ConcurrentHashMap<>();
 
-    @Autowired
-    private BrickletAmbientLight.IlluminanceListener illuminanceListener;
+	private final List<DeviceDestroyer> deviceDestroyers = new ArrayList<>();
 
-    @Autowired
-    private BrickletHumidity.HumidityListener humidityListener;
+	private IPConnection ipConnection;
 
-    @Autowired
-    private BrickletBarometer.AirPressureListener airPressureListener;
+	public WeatherStation() {
+		DisplayManager displayManager = new DisplayManager();
 
-    @Autowired
-    private BrickletLCD20x4.ButtonReleasedListener buttonReleasedListener;
+		deviceInitializers.put(BrickletLCD20x4.DEVICE_IDENTIFIER, displayManager);
+		deviceInitializers.put(BrickletAmbientLight.DEVICE_IDENTIFIER, new AmbientLightSensorInitializer());
+		deviceInitializers.put(BrickletHumidity.DEVICE_IDENTIFIER, new HumiditySensorInitializer());
+		deviceInitializers.put(BrickletBarometer.DEVICE_IDENTIFIER, new AirPressureInitializer());
 
-    @Autowired
-    private DisplayHolder displayHolder;
+		deviceDestroyers.add(displayManager);
+	}
 
-    @Autowired
-    private TemperatureMeasuringTask temperatureMeasuringTask;
+	@Scheduled(fixedRateString = "${reconnectRate}")
+	public void initialize() {
+		initializeConnection();
+		initializeHardware();
+	}
 
-    public static void main(String[] args) {
-        SpringApplication.run(WeatherStation.class, args);
-    }
+	private void initializeConnection() {
+		prepareConnection();
 
-    @Scheduled(fixedRate = 3000)
-    private void initialize() {
-        prepareConnection();
-        initializeConnection();
-        initializeHardware();
-    }
+		logger.trace("Initializing connection...");
+		try {
+			if (isDisconnected()) {
+				connect();
+			}
+		} catch (IOException e) {
+			logger.error("Error while connection to {} via port {}.", host, port, e);
+		} catch (AlreadyConnectedException e) {
+			logger.trace("Already connected.");
+		}
+		logger.trace("Initialized connection.");
+	}
 
-    private void prepareConnection() {
-        if (ipConnection == null) {
-            ipConnection = new IPConnection();
-            ipConnection.setAutoReconnect(true);
-        }
-    }
+	private void initializeHardware() {
+		logger.trace("Initializing hardware...");
+		logger.trace("Enumerating hardware...");
+		try {
+			ipConnection.enumerate();
+		} catch (NotConnectedException e) {
+			logger.error("Not connected to host.", e);
+		}
+	}
 
-    private void initializeConnection() {
-        logger.trace("Initializing connection...");
-        try {
-            if (ipConnection.getConnectionState() == IPConnection.CONNECTION_STATE_DISCONNECTED) {
-                ipConnection.connect(HOST, PORT);
-                ipConnection.addConnectedListener(this);
-                ipConnection.addEnumerateListener(this);
-                ipConnection.addDisconnectedListener(this);
-            }
-        } catch (IOException e) {
-            logger.error("Error while connection to {} via port {}.", HOST, PORT, e);
-        } catch (AlreadyConnectedException e) {
-            logger.trace("Already connected.");
-        }
-        logger.trace("Initialized connection.");
-    }
+	private void prepareConnection() {
+		if (ipConnection == null) {
+			ipConnection = new IPConnection();
+			ipConnection.setAutoReconnect(true);
+		}
+	}
 
-    private void initializeHardware() {
-        logger.trace("Initializing hardware...");
-        logger.trace("Enumerating hardware...");
-        try {
-            ipConnection.enumerate();
-        } catch (NotConnectedException e) {
-            logger.error("Not connected to host.", e);
-        }
-    }
+	private void connect() throws IOException, AlreadyConnectedException {
+		ipConnection.connect(host, port);
+		ipConnection.addConnectedListener(this::logConnectionEstablished);
+		ipConnection.addDisconnectedListener(disconnectReasonCode -> deviceDestroyers.forEach(DeviceDestroyer::destroy));
+		ipConnection.addEnumerateListener(new DeviceEnumerationListener());
+	}
 
-    @Override
-    public void connected(short connectReasonCode) {
-        switch (connectReasonCode) {
-            case IPConnection.CONNECT_REASON_REQUEST:
-                logger.trace("Connection established upon user request.");
-                break;
-            case IPConnectionBase.CONNECT_REASON_AUTO_RECONNECT:
-                logger.trace("Connection established by auto reconnect.");
-                break;
-            default:
-                break;
-        }
-    }
+	private void logConnectionEstablished(short connectReasonCode) {
+		switch (connectReasonCode) {
+			case IPConnection.CONNECT_REASON_REQUEST:
+				logger.trace("Connection established upon user request.");
+				break;
+			case IPConnectionBase.CONNECT_REASON_AUTO_RECONNECT:
+				logger.trace("Connection established by auto reconnect.");
+				break;
+		}
+	}
 
-    @Override
-    public void enumerate(String uid, String connectedUid, char position, short[] hardwareVersion, short[] firmwareVersion, int deviceIdentifier, short enumerationType) {
-        if (enumerationType == IPConnection.ENUMERATION_TYPE_DISCONNECTED) {
-            return;
-        }
+	private boolean isDisconnected() {
+		return isConnectionStateDisconnected(ipConnection.getConnectionState());
+	}
 
-        try {
-            initializeDisplay(uid, deviceIdentifier);
-            initializeAmbientLightSensor(uid, deviceIdentifier);
-            initializeHumiditySensor(uid, deviceIdentifier);
-            initializeAirPressurSensor(uid, deviceIdentifier);
-        } catch (TimeoutException | NotConnectedException e) {
-            logger.error("An error occured while initializing the hardware.", e);
-        }
-    }
+	private boolean isConnectionStateDisconnected(short connectionState) {
+		return connectionState == IPConnection.CONNECTION_STATE_DISCONNECTED;
+	}
 
-    @Override
-    public void disconnected(short disconnectReason) {
-        try {
-            BrickletLCD20x4 display = displayHolder.getDisplay();
-            display.clearDisplay();
-            display.backlightOff();
-        } catch (TimeoutException | NotConnectedException e) {
-            logger.error("Encountered exception: ", e);
-        } catch (DisplayNotYetAvailableException e) {
-            logger.error("Cannot clear display and disable the backlight, because the display is not available.");
-        }
-    }
+	private DeviceInitializer getDeviceInitializer(int deviceIdentifier) {
+		return deviceInitializers.containsKey(deviceIdentifier) ? deviceInitializers.get(deviceIdentifier) : null;
+	}
 
-    private void initializeDisplay(String uid, int deviceIdentifier) throws TimeoutException, NotConnectedException {
-        if (isDisplay(deviceIdentifier)) {
-            BrickletLCD20x4 display = new BrickletLCD20x4(uid, ipConnection);
-            display.addButtonReleasedListener(buttonReleasedListener);
+	private class DeviceEnumerationListener implements IPConnection.EnumerateListener {
+		@Override
+		public void enumerate(String uid, String connectedUid, char position, short[] hardwareVersion, short[] firmwareVersion, int deviceIdentifier, short enumerationType) {
+			if (isConnectionStateDisconnected(enumerationType)) {
+				return;
+			}
 
-            short[][] customCharacters = getCustomCharacters();
-            for (short i = 0; i < customCharacters.length; i++) {
-                display.setCustomCharacter(i, customCharacters[i]);
-            }
-
-            displayHolder.setDisplay(display);
-        }
-    }
-
-    private void initializeAmbientLightSensor(String uid, int deviceIdentifier) throws TimeoutException, NotConnectedException {
-        if (isAmbientLightSensor(deviceIdentifier)) {
-            BrickletAmbientLight ambientLightSensor = new BrickletAmbientLight(uid, ipConnection);
-            ambientLightSensor.setIlluminanceCallbackPeriod(SENSOR_CALLBACK_PERIOD);
-            ambientLightSensor.addIlluminanceListener(illuminanceListener);
-        }
-    }
-
-    private void initializeHumiditySensor(String uid, int deviceIdentifier) throws TimeoutException, NotConnectedException {
-        if (isHumiditySensor(deviceIdentifier)) {
-            BrickletHumidity humiditySensor = new BrickletHumidity(uid, ipConnection);
-            humiditySensor.setHumidityCallbackPeriod(SENSOR_CALLBACK_PERIOD);
-            humiditySensor.addHumidityListener(humidityListener);
-        }
-    }
-
-    private void initializeAirPressurSensor(String uid, int deviceIdentifier) throws TimeoutException, NotConnectedException {
-        if (isAirPressureSensor(deviceIdentifier)) {
-            BrickletBarometer airPressureSensor = new BrickletBarometer(uid, ipConnection);
-            airPressureSensor.setAirPressureCallbackPeriod(SENSOR_CALLBACK_PERIOD);
-            airPressureSensor.addAirPressureListener(airPressureListener);
-
-            temperatureMeasuringTask.setAirPressureSensor(airPressureSensor);
-        }
-    }
-
-    private boolean isDisplay(int deviceIdentifier) {
-        return deviceIdentifier == BrickletLCD20x4.DEVICE_IDENTIFIER;
-    }
-
-    private boolean isAmbientLightSensor(int deviceIdentifier) {
-        return deviceIdentifier == BrickletAmbientLight.DEVICE_IDENTIFIER;
-    }
-
-    private boolean isHumiditySensor(int deviceIdentifier) {
-        return deviceIdentifier == BrickletHumidity.DEVICE_IDENTIFIER;
-    }
-
-    private boolean isAirPressureSensor(int deviceIdentifier) {
-        return deviceIdentifier == BrickletBarometer.DEVICE_IDENTIFIER;
-    }
-
-    private short[][] getCustomCharacters() {
-        short[][] customCharacters = new short[8][];
-            customCharacters[0] = new short[]{0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b11111111};
-            customCharacters[1] = new short[]{0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b11111111, 0b11111111};
-            customCharacters[2] = new short[]{0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b11111111};
-            customCharacters[3] = new short[]{0b00000000, 0b00000000, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b11111111, 0b11111111};
-            customCharacters[4] = new short[]{0b00000000, 0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111};
-            customCharacters[5] = new short[]{0b00000000, 0b00000000, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111};
-            customCharacters[6] = new short[]{0b00000000, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111};
-            customCharacters[7] = new short[]{0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111, 0b11111111};
-        return customCharacters;
-    }
+			DeviceInitializer deviceInitializer = getDeviceInitializer(deviceIdentifier);
+			if (deviceInitializer != null) {
+				try {
+					deviceInitializer.initialize(ipConnection, uid, deviceIdentifier);
+				} catch (TimeoutException | NotConnectedException e) {
+					logger.error("An error occurred while initializing the hardware.", e);
+				}
+			}
+		}
+	}
 }

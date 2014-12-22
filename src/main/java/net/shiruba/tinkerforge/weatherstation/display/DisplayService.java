@@ -61,7 +61,7 @@ public class DisplayService {
                         formattedOutputString
                 );
             }
-        } catch (DisplayNotYetAvailableException e) {
+        } catch (DisplayNotAvailableException e) {
             logger.error("Ignoring user request because the display is not yet available.");
         } catch (TimeoutException | NotConnectedException e) {
             logger.error("Encountered exception while writing output to the display.", e);
@@ -100,12 +100,12 @@ public class DisplayService {
             }
         } catch (TimeoutException | NotConnectedException e) {
             logger.error("Encountered an exception while enabling the displays backlight.", e);
-        } catch (DisplayNotYetAvailableException e) {
+        } catch (DisplayNotAvailableException e) {
             logger.error("Ignoring user request because the display is not yet available.");
         }
     }
 
-    @Scheduled(fixedDelay = 60000)
+    @Scheduled(fixedDelayString = "${displayRefreshRate}")
     private void refreshDisplay() {
         switch (mode) {
             case OVERVIEW:
@@ -131,6 +131,6 @@ public class DisplayService {
         DIAGRAM
     }
 
-    private class PaintRequest {
+    private interface PaintRequest {
     }
 }
