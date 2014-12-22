@@ -19,7 +19,7 @@ public class TemperatureMeasuringTask {
     private BrickletBarometer airPressureSensor;
 
     @Scheduled(fixedRate = WeatherStation.SENSOR_CALLBACK_PERIOD)
-    public void measureTemperatur() throws TimeoutException, NotConnectedException {
+    public void measureTemperature() throws TimeoutException, NotConnectedException {
         if (airPressureSensor == null) {
             return;
         }
